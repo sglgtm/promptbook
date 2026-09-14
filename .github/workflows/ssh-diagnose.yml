@@ -1,0 +1,173 @@
+name: SSH Diagnose (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "Причина запуска (не обязательно)"
+        required: false
+        default: "manual diagnostic"
+
+# Только чтение репозитория; никаких прав на пакеты/деплой.
+permissions:
+  contents: read
+
+concurrency:
+  group: ssh-diagnose
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    name: Read-only SSH diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Prepare SSH context
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Валидация обязательных секретов без вывода их значений.
+          missing=0
+          for var in SSH_HOST SSH_PORT SSH_USER SSH_PRIVATE_KEY; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Secret ${var} is empty or missing"
+              missing=$((missing+1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then exit 1; fi
+
+          # Маскируем host/user на всякий случай, чтобы они не оказались в логах.
+          echo "::add-mask::${SSH_HOST}"
+          echo "::add-mask::${SSH_USER}"
+
+          # Создаём приватную папку SSH.
+          umask 077
+          mkdir -p "${HOME}/.ssh"
+          KEY_FILE="${HOME}/.ssh/id_promptbook_deploy"
+          printf '%s\n' "${SSH_PRIVATE_KEY}" > "${KEY_FILE}"
+          chmod 600 "${KEY_FILE}"
+
+          # Порт-нормализация (по умолчанию 22).
+          PORT="${SSH_PORT:-22}"
+
+          # Сначала снимаем и фиксируем host key через ssh-keyscan.
+          # StrictHostKeyChecking=yes на самом ssh-подключении обеспечит,
+          # что подмена ключа приведёт к ошибке.
+          KNOWN="${HOME}/.ssh/known_hosts"
+          : > "${KNOWN}"
+          if ! ssh-keyscan -T 10 -p "${PORT}" -t ed25519,ecdsa,rsa "${SSH_HOST}" >> "${KNOWN}" 2>/dev/null; then
+            echo "::error::ssh-keyscan не смог получить host key. Проверь SSH_HOST/SSH_PORT и что порт открыт."
+            exit 1
+          fi
+          chmod 600 "${KNOWN}"
+
+          # Печатаем ТОЛЬКО SHA256 fingerprints, чтобы ты мог сверить с сервером.
+          echo ""
+          echo "----- SSH host key fingerprints (SHA256) -----"
+          # ssh-keygen -lf выводит формат: bits SHA256:<hash> comment (type)
+          # никаких приватных данных, только hash — безопасно для логов.
+          ssh-keygen -lf "${KNOWN}" | awk '{ printf "  %s %s\n", $2, $NF }'
+          echo "----------------------------------------------"
+          echo ""
+
+          # Пробрасываем переменные в следующие шаги через env-файл.
+          {
+            echo "PB_PORT=${PORT}"
+            echo "PB_KEY=${KEY_FILE}"
+            echo "PB_KNOWN=${KNOWN}"
+          } >> "$GITHUB_ENV"
+
+      - name: Run remote read-only diagnostic
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Маскируем на всякий случай в текущем шаге тоже.
+          echo "::add-mask::${SSH_HOST}"
+          echo "::add-mask::${SSH_USER}"
+
+          COMMON_SSH_OPTS=(
+            -i "${PB_KEY}"
+            -p "${PB_PORT}"
+            -o UserKnownHostsFile="${PB_KNOWN}"
+            -o StrictHostKeyChecking=yes
+            -o BatchMode=yes
+            -o ConnectTimeout=15
+            -o ServerAliveInterval=10
+            -o ServerAliveCountMax=2
+            -o LogLevel=ERROR
+          )
+
+          # Гейзер команд — read-only, без sudo, без чтения приватных файлов.
+          # Печатаем только имена файлов/каталогов; никакого cat на файлы проекта.
+          REMOTE_SCRIPT='
+            set -eu
+            echo "===== HOSTNAME ====="
+            hostname
+            echo
+            echo "===== WHOAMI ====="
+            whoami
+            echo
+            echo "===== PWD ====="
+            pwd
+            echo
+            echo "===== UNAME -A ====="
+            uname -a
+            echo
+            echo "===== OS RELEASE ====="
+            if command -v lsb_release >/dev/null 2>&1; then
+              lsb_release -ds
+            elif [ -r /etc/os-release ]; then
+              . /etc/os-release
+              printf "%s %s\n" "${NAME:-unknown}" "${VERSION:-}"
+            else
+              echo "no lsb_release; /etc/os-release unreadable"
+            fi
+            echo
+            echo "===== TOOLCHAIN VERSIONS ====="
+            printf "node:  %s\n" "$(command -v node >/dev/null 2>&1 && node -v || echo not installed)"
+            printf "npm:   %s\n" "$(command -v npm  >/dev/null 2>&1 && npm -v  || echo not installed)"
+            printf "nginx: %s\n" "$(command -v nginx >/dev/null 2>&1 && nginx -v 2>&1 || echo not installed)"
+            printf "pm2:   %s\n" "$(command -v pm2   >/dev/null 2>&1 && pm2 -v   || echo not installed)"
+            echo
+            echo "===== DISK FREE ====="
+            df -h
+            echo
+            echo "===== /var/www LISTING (top level, no hidden, no file contents) ====="
+            if [ -d /var/www ]; then
+              ls -l --group-directories-first --time-style=long-iso /var/www 2>/dev/null || ls -l /var/www
+            else
+              echo "/var/www does not exist"
+            fi
+            echo
+            echo "===== END ====="
+          '
+
+          # Одно подключение, один вызов bash -s — минимальный поверхностный след.
+          if ! ssh "${COMMON_SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" 'bash -s' <<< "${REMOTE_SCRIPT}"; then
+            echo "::error::SSH-подключение или удалённая диагностика не удались. См. вывод выше."
+            exit 1
+          fi
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          # Удаляем приватный ключ и known_hosts с раннера.
+          if [ -n "${PB_KEY:-}" ] && [ -f "${PB_KEY}" ]; then
+            shred -u "${PB_KEY}" 2>/dev/null || rm -f "${PB_KEY}"
+          fi
+          if [ -n "${PB_KNOWN:-}" ] && [ -f "${PB_KNOWN}" ]; then
+            rm -f "${PB_KNOWN}"
+          fi
+          echo "SSH artefacts removed from runner."
