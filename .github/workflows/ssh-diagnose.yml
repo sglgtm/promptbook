@@ -84,10 +84,14 @@ jobs:
             echo "PB_KNOWN=${KNOWN}"
           } >> "$GITHUB_ENV"
 
+      - name: Checkout (для scripts/remote-envcheck.sh)
+        uses: actions/checkout@v4
+
       - name: Run remote read-only diagnostic
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         shell: bash
         run: |
           set -euo pipefail
@@ -108,9 +112,9 @@ jobs:
             -o LogLevel=ERROR
           )
 
-          # Гейзер команд — read-only, без sudo, без чтения приватных файлов.
-          # Печатаем только имена файлов/каталогов; никакого cat на файлы проекта.
-          REMOTE_SCRIPT='
+          # Скрипт вынесен в scripts/remote-envcheck.sh, чтобы не ломать YAML heredoc.
+          # Read-only. Показывает состояние деплой-папки и КЛЮЧИ .env.local без значений.
+          REMOTE_SCRIPT_UNUSED='
             set -eu
             echo "===== HOSTNAME ====="
             hostname
@@ -153,8 +157,9 @@ jobs:
             echo "===== END ====="
           '
 
-          # Одно подключение, один вызов bash -s — минимальный поверхностный след.
-          if ! ssh "${COMMON_SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" 'bash -s' <<< "${REMOTE_SCRIPT}"; then
+          echo "::add-mask::${DEPLOY_PATH}"
+          if ! ssh "${COMMON_SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+               "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" < scripts/remote-envcheck.sh; then
             echo "::error::SSH-подключение или удалённая диагностика не удались. См. вывод выше."
             exit 1
           fi
