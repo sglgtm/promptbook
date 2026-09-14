@@ -9,7 +9,7 @@ type Mode = "signup" | "login";
 export function AuthForm({ mode }: { mode: Mode }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const next = searchParams.get("next") || "/dashboard";
+  const next: string = searchParams.get("next") || "/dashboard";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -35,13 +35,13 @@ export function AuthForm({ mode }: { mode: Mode }) {
           setInfo("Мы отправили письмо для подтверждения. После подтверждения войди на /login.");
           return;
         }
-        router.replace(next);
+        router.replace(next as never);
         router.refresh();
         return;
       }
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) return setError(error.message);
-      router.replace(next);
+      router.replace(next as never);
       router.refresh();
     });
   };
