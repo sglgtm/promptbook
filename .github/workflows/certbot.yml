@@ -1,0 +1,63 @@
+name: Certbot (Let's Encrypt for afawots.ru)
+
+on:
+  workflow_dispatch:
+    inputs:
+      email:
+        description: "Email for Let's Encrypt notifications"
+        required: true
+        default: "sgchartertech@gmail.com"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  cert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SSH prep
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${SSH_HOST}"
+          echo "::add-mask::${SSH_USER}"
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "${SSH_PRIVATE_KEY}" > "$HOME/.ssh/id_key"
+          chmod 600 "$HOME/.ssh/id_key"
+          : > "$HOME/.ssh/known_hosts"
+          ssh-keyscan -T 10 -p "${SSH_PORT:-22}" -t ed25519,ecdsa,rsa "${SSH_HOST}" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          echo "PORT=${SSH_PORT:-22}" >> "$GITHUB_ENV"
+
+      - name: Run certbot on server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          DOMAIN_EMAIL: ${{ inputs.email }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${SSH_HOST}"
+          echo "::add-mask::${SSH_USER}"
+          ssh -i "$HOME/.ssh/id_key" -p "$PORT" \
+              -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+              -o StrictHostKeyChecking=yes -o BatchMode=yes -o LogLevel=ERROR \
+              "${SSH_USER}@${SSH_HOST}" \
+              "DOMAIN_EMAIL='${DOMAIN_EMAIL}' bash -s" < scripts/remote-certbot.sh
+
+      - name: Cleanup
+        if: always()
+        run: rm -f "$HOME/.ssh/id_key" "$HOME/.ssh/known_hosts"
