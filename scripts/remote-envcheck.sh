@@ -8,6 +8,14 @@ whoami
 echo "HOME=$HOME"
 echo
 
+echo "===== $HOME/promptbook ====="
+if [ -d "$HOME/promptbook" ]; then
+  ls -la --time-style=long-iso "$HOME/promptbook" | head -25
+else
+  echo "nope"
+fi
+echo
+
 echo "===== deploy path ====="
 if [ -d "$DEPLOY_PATH_LOCAL" ]; then
   ls -ld "$DEPLOY_PATH_LOCAL"
