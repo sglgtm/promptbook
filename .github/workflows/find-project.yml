@@ -1,0 +1,52 @@
+name: Find project on server
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SSH prep
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${SSH_HOST}"
+          echo "::add-mask::${SSH_USER}"
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "${SSH_PRIVATE_KEY}" > "$HOME/.ssh/id_key"
+          chmod 600 "$HOME/.ssh/id_key"
+          : > "$HOME/.ssh/known_hosts"
+          ssh-keyscan -T 10 -p "${SSH_PORT:-22}" -t ed25519,ecdsa,rsa "${SSH_HOST}" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          echo "PORT=${SSH_PORT:-22}" >> "$GITHUB_ENV"
+
+      - name: Run find
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${SSH_HOST}"
+          echo "::add-mask::${SSH_USER}"
+          ssh -i "$HOME/.ssh/id_key" -p "$PORT" \
+              -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+              -o StrictHostKeyChecking=yes -o BatchMode=yes -o LogLevel=ERROR \
+              "${SSH_USER}@${SSH_HOST}" 'bash -s' < scripts/remote-find.sh
+
+      - name: Cleanup
+        if: always()
+        run: rm -f "$HOME/.ssh/id_key" "$HOME/.ssh/known_hosts"
